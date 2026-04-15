@@ -1,0 +1,122 @@
+#define F_CPU 8000000UL
+#include <avr/io.h>
+#include <util/delay.h>
+#include <stdio.h>
+
+#define LCD_ADDR 0x40 
+#define EN 2
+#define RS 0
+#define BL 3
+#define DHT_PIN PD2
+
+const char* warnings[] = {
+    "Focus on road   ",
+    "No Phone Driving",
+    "Stay in Lane    ",
+    "Fasten Seatbelt "
+};
+
+uint8_t warning_index = 0;
+uint8_t T = 25, H = 50; 
+uint8_t timer_5sec = 5; // جعلناها 5 لتبدأ الشاشة بالعمل فوراً
+
+// --- دالات I2C و LCD ---
+void i2c_init() { TWSR = 0x00; TWBR = 0x20; TWCR = (1 << TWEN); }
+void i2c_write(uint8_t data) { TWDR = data; TWCR = (1 << TWINT) | (1 << TWEN); while (!(TWCR & (1 << TWINT))); }
+void i2c_start() { TWCR = (1 << TWINT) | (1 << TWSTA) | (1 << TWEN); while (!(TWCR & (1 << TWINT))); }
+void i2c_stop() { TWCR = (1 << TWINT) | (1 << TWSTO) | (1 << TWEN); }
+
+void lcd_send(uint8_t val, uint8_t mode) {
+    uint8_t high = (val & 0xF0) | mode | (1 << BL);
+    uint8_t low = ((val << 4) & 0xF0) | mode | (1 << BL);
+    i2c_start(); i2c_write(LCD_ADDR);
+    i2c_write(high | (1 << EN)); _delay_us(1); i2c_write(high & ~(1 << EN));
+    i2c_write(low | (1 << EN)); _delay_us(1); i2c_write(low & ~(1 << EN));
+    i2c_stop();
+}
+
+void lcd_init() {
+    _delay_ms(100); 
+    lcd_send(0x02, 0); // تهيئة نمط 4-بت
+    lcd_send(0x28, 0); // سطرين ومصفوفة 5x7
+    lcd_send(0x0C, 0); // تشغيل العرض وإخفاء المؤشر
+    lcd_send(0x01, 0); // مسح الشاشة
+    _delay_ms(5);
+}
+
+void lcd_print(const char *str) { while (*str) lcd_send(*str++, 1); }
+
+void read_dht11() {
+    uint8_t bits[5] = {0,0,0,0,0}, i, j, timeout;
+    DDRD |= (1 << DHT_PIN); PORTD &= ~(1 << DHT_PIN); _delay_ms(18);
+    PORTD |= (1 << DHT_PIN); DDRD &= ~(1 << DHT_PIN); _delay_us(30);
+    timeout = 200; while((PIND & (1 << DHT_PIN)) && --timeout);
+    if (timeout == 0) return;
+    timeout = 200; while(!(PIND & (1 << DHT_PIN)) && --timeout);
+    timeout = 200; while((PIND & (1 << DHT_PIN)) && --timeout);
+    for (i = 0; i < 5; i++) {
+        for (j = 0; j < 8; j++) {
+            timeout = 200; while (!(PIND & (1 << DHT_PIN)) && --timeout);
+            _delay_us(35);
+            if (PIND & (1 << DHT_PIN)) bits[i] |= (1 << (7 - j));
+            timeout = 200; while ((PIND & (1 << DHT_PIN)) && --timeout);
+        }
+    }
+    if (bits[0] != 0) { H = bits[0]; T = bits[2]; }
+}
+
+void update_system_smart() {
+    char buffer[20];
+    if (timer_5sec >= 5) {
+        read_dht11();
+        lcd_send(0x80, 0); 
+        sprintf(buffer, "T:%uC  H:%u%%  ", T, H);
+        lcd_print(buffer);
+        lcd_send(0xC0, 0); 
+        lcd_print(warnings[warning_index]);
+        warning_index = (warning_index + 1) % 4;
+        timer_5sec = 0; 
+    }
+    timer_5sec++;
+}
+
+void display_segments(uint8_t val) {
+    PORTA = ((val / 10) << 4) | (val % 10);
+}
+
+int main(void) {
+    MCUCSR = (1<<JTD); MCUCSR = (1<<JTD); // تعطيل JTAG لضمان عمل PORTC
+    DDRA = 0xFF; DDRB = 0xFF; DDRD &= ~(1 << DHT_PIN); 
+    
+    i2c_init(); 
+    lcd_init();
+    
+    // إظهار رسالة ترحيب سريعة فور التشغيل
+    lcd_send(0x80, 0);
+    lcd_print("Initializing...");
+    _delay_ms(500);
+
+    while (1) {
+        // أخضر
+        PORTB = (1 << PB2) | (1 << PB3); 
+        for (int i = 40; i >= 4; i--) {
+            display_segments(i);
+            update_system_smart();
+            _delay_ms(900); 
+        }
+        // أصفر
+        PORTB = (1 << PB1) | (1 << PB3); 
+        for (int i = 3; i >= 0; i--) {
+            display_segments(i);
+            update_system_smart();
+            _delay_ms(900);
+        }
+        // أحمر
+        PORTB = (1 << PB0) | (1 << PB5); 
+        for (int i = 40; i >= 0; i--) {
+            display_segments(i);
+            update_system_smart();
+            _delay_ms(900);
+        }
+    }
+}

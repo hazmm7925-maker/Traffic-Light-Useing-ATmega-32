@@ -1,0 +1,146 @@
+#ifndef F_CPU
+#define F_CPU 8000000UL
+#endif
+
+#include <avr/io.h>
+#include <util/delay.h>
+#include <stdio.h>
+
+// --- إعدادات العناوين والحساس ---
+#define LCD_ADDR 0x4E
+#define DHT_PIN  PD2
+
+uint8_t I_Temp = 25, I_RH = 50, msg_index = 0;
+
+// --- وظائف الـ I2C (كما هي في كودك) ---
+void i2c_init() {
+	TWSR = 0x00;
+	TWBR = 0x20;
+	TWCR = (1 << TWEN);
+}
+
+void i2c_start() {
+	TWCR = (1 << TWINT) | (1 << TWSTA) | (1 << TWEN);
+	while (!(TWCR & (1 << TWINT)));
+}
+
+void i2c_stop() {
+	TWCR = (1 << TWINT) | (1 << TWSTO) | (1 << TWEN);
+}
+
+void i2c_write(uint8_t data) {
+	TWDR = data;
+	TWCR = (1 << TWINT) | (1 << TWEN);
+	while (!(TWCR & (1 << TWINT)));
+}
+
+// --- وظائف الـ LCD I2C (بنفس التوقيت والمنطق الخاص بك) ---
+void lcd_send(uint8_t val, uint8_t mode) {
+	uint8_t high = (val & 0xF0) | mode | 0x08;
+	uint8_t low = ((val << 4) & 0xF0) | mode | 0x08;
+	i2c_start();
+	i2c_write(LCD_ADDR);
+	i2c_write(high | 0x04); _delay_us(50); i2c_write(high & ~0x04);
+	i2c_write(low | 0x04);  _delay_us(50); i2c_write(low & ~0x04);
+	i2c_stop();
+}
+
+void lcd_init_i2c() {
+	_delay_ms(50);
+	lcd_send(0x03, 0); _delay_ms(5);
+	lcd_send(0x03, 0); _delay_us(150);
+	lcd_send(0x03, 0);
+	lcd_send(0x02, 0);
+	lcd_send(0x28, 0);
+	lcd_send(0x0C, 0);
+	lcd_send(0x01, 0);
+	_delay_ms(2);
+}
+
+void lcd_string(const char *s) {
+	while (*s) lcd_send(*s++, 1);
+}
+
+// --- قراءة الحساس DHT11 ---
+void read_dht11() {
+	uint8_t bits[5] = {0,0,0,0,0}, timeout;
+	DDRD |= (1 << DHT_PIN); PORTD &= ~(1 << DHT_PIN); _delay_ms(18);
+	PORTD |= (1 << DHT_PIN); DDRD &= ~(1 << DHT_PIN); _delay_us(30);
+
+	timeout = 100; while ((PIND & (1 << DHT_PIN)) && --timeout);
+	if (timeout == 0) return;
+	timeout = 100; while (!(PIND & (1 << DHT_PIN)) && --timeout);
+	timeout = 100; while ((PIND & (1 << DHT_PIN)) && --timeout);
+
+	for (int i = 0; i < 5; i++) {
+		for (int j = 0; j < 8; j++) {
+			timeout = 100; while (!(PIND & (1 << DHT_PIN)) && --timeout);
+			_delay_us(35);
+			if (PIND & (1 << DHT_PIN)) bits[i] |= (1 << (7 - j));
+			timeout = 100; while ((PIND & (1 << DHT_PIN)) && --timeout);
+		}
+	}
+	if (bits[0] != 0) { I_RH = bits[0]; I_Temp = bits[2]; }
+}
+
+// --- تحديث النظام بالكامل ---
+void update_system(const char* traffic_label, int count, uint8_t led_pattern) {
+	char buf[20];
+	const char* messages[] = {
+		"Stay in lane    ",
+		"Fasten seatbelt ",
+		"No phone use    ",
+		"Focus on road   "
+	};
+
+	// 1. تحديث الهاردوير (PORTA للسجمنت، PORTC لليدات)
+	PORTA = (count % 10) | ((count / 10) << 4);
+	PORTC = led_pattern;
+
+	// 2. قراءة الحساس
+	read_dht11();
+
+	// 3. تحديث الـ LCD I2C
+	lcd_send(0x80, 0); // السطر الأول
+	sprintf(buf, "T:%02dC H:%02d%% %s", I_Temp, I_RH, traffic_label);
+	lcd_string(buf);
+
+	lcd_send(0xC0, 0); // السطر الثاني
+	sprintf(buf, "#%02d %s", count, messages[msg_index]);
+	lcd_string(buf);
+	
+	msg_index = (msg_index + 1) % 4;
+}
+
+int main(void) {
+	DDRA = 0xFF; // السجمنت
+	DDRC = 0xFF; // الليدات (PC0-PC7)
+	DDRD &= ~(1 << DHT_PIN); // PD2 مدخل للحساس
+	DDRB = 0x00; // بورت B فارغ تماماً
+	
+	i2c_init();
+	_delay_ms(100);
+	lcd_init_i2c();
+
+	while (1) {
+		// المرحلة 1: G1 أخضر (40-1)
+		for (int i = 40; i >= 1; i--) {
+			uint8_t pattern = (1 << PC2); // G1 ON
+			if (i >= 5) pattern |= (1 << PC7); // R2 ON
+			else        pattern |= (1 << PC6); // Y2 ON
+			
+			update_system("GO ", i, pattern);
+			_delay_ms(1000);
+		}
+
+		// المرحلة 2: G2 أخضر (40-1)
+		for (int i = 40; i >= 1; i--) {
+			uint8_t pattern = (1 << PC5); // G2 ON
+			if (i >= 5) pattern |= (1 << PC4); // R1 ON
+			else        pattern |= (1 << PC3); // Y1 ON
+			
+			update_system("GO ", i, pattern);
+			_delay_ms(1000);
+		}
+	}
+}
